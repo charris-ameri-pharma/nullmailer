@@ -1,0 +1,9 @@
+{
+    "workbench.colorCustomizations": {
+        "editorOverviewRuler.infoForeground": "#00FFCC",
+        "editorInfo.foreground": "#00ffcc",
+        "activityBar.background": "#540855",
+        "titleBar.activeBackground": "#750B77",
+        "titleBar.activeForeground": "#FEFAFF"
+    }
+}

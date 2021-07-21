@@ -47,9 +47,9 @@
 
 const char* cli_program = "nullmailer-send";
 
-selfpipe selfpipe;
+selfpipe spipe;
 
-typedef enum { tempfail=-1, permfail=0, success=1 } tristate;
+typedef enum { addrfail=-2, tempfail=-1, permfail=0, success=1 } tristate;
 
 struct message
 {
@@ -99,7 +99,7 @@ remote::remote(const slist& lst)
       mystring option = *iter;
       // Strip prefix "--"
       if (option[0] == '-' && option[1] == '-')
-	option = option.right(2);
+        option = option.right(2);
       options += option;
       options += '\n';
     }
@@ -113,6 +113,7 @@ remote::~remote() { }
 typedef list<remote> rlist;
 
 static rlist remotes;
+static slist destinations;
 static int minpause = 60;
 static int pausetime = minpause;
 static int maxpause = 24*60*60;
@@ -137,6 +138,15 @@ bool load_remotes()
   return true;
 }
 
+bool load_destinations()
+{
+  destinations.empty();
+  config_readlist("destinations", destinations);
+  if (destinations.count() == 0)
+    fail("No destinations listed for delivery");
+  return true;
+}
+
 bool load_config()
 {
   mystring hh;
@@ -158,7 +168,11 @@ bool load_config()
   if (minpause != oldminpause)
     pausetime = minpause;
 
-  return load_remotes();
+  if (load_destinations())
+  {
+    return load_remotes();
+  }
+  return false;
 }
 
 static msglist messages;
@@ -198,11 +212,11 @@ bool load_messages()
 tristate catchsender(fork_exec& fp)
 {
   for (;;) {
-    switch (selfpipe.waitsig(sendtimeout)) {
+    switch (spipe.waitsig(sendtimeout)) {
     case 0:			// timeout
       fout << "Sending timed out, killing protocol" << endl;
       fp.kill(SIGTERM);
-      selfpipe.waitsig();	// catch the signal from killing the child
+      spipe.waitsig();	// catch the signal from killing the child
       return tempfail;
     case -1:
       msg1sys("Error waiting for the child signal: ");
@@ -238,6 +252,43 @@ tristate catchsender(fork_exec& fp)
       return tempfail;
     }
   }
+}
+
+bool check_sender_and_destination(int fd)
+{
+  bool retval = false;
+
+  fout << "Checking sender and destination:" << endl;
+  fdibuf in(fd);
+  mystring line;
+  if (in.getline(line, '\n')) {
+    // load sender
+    if (!line || line[0] == '#') {
+      fout << " SENDER INVALID!" << endl;
+      retval = false;
+    } else if (in.getline(line, '\n')) {
+      // load first recipient, there can only be one (TODO: allow mulitiple?)
+      if (!line || line[0] == '#') {
+        fout << " DESTINATION INVALID!" << endl;
+        retval = false;
+      } else {
+        for(slist::const_iter d(destinations); d; d++) {
+          fout << *d << " vs. " << line;
+          if (*d == line) {
+            fout << " MATCH" << endl;
+            retval = true;
+            break;
+          } else {
+            fout << " NO MATCH" << endl;
+          }
+        }
+      }
+    }
+    lseek(fd, 0, SEEK_SET);
+  } else {
+    fout << " NO SENDER FOUND!" << endl;
+  }
+  return retval;
 }
 
 bool log_msg(mystring& filename, remote& remote, int fd)
@@ -294,6 +345,8 @@ tristate send_one(mystring filename, remote& remote, mystring& output)
     fout << "Can't open file '" << filename << "'" << endl;
     return tempfail;
   }
+  if (!check_sender_and_destination(fd))
+    return addrfail;
   log_msg(filename, remote, fd);
 
   fork_exec fp(remote.proto.c_str());
@@ -395,27 +448,27 @@ void send_all()
     while(msg) {
       switch (send_one((*msg).filename, *remote, output)) {
       case tempfail:
-	if (time(0) - (*msg).timestamp > queuelifetime) {
-	  if (bounce_msg(*msg, *remote, output)) {
-	    messages.remove(msg);
-	    continue;
-	  }
-	}
-	msg++;
-	break;
+        if (time(0) - (*msg).timestamp > queuelifetime) {
+          if (bounce_msg(*msg, *remote, output)) {
+            messages.remove(msg);
+            continue;
+          }
+        }
+        msg++;
+        break;
       case permfail:
-	if (bounce_msg(*msg, *remote, output))
-	  messages.remove(msg);
-	else
-	  msg++;
-	break;
+        if (bounce_msg(*msg, *remote, output))
+          messages.remove(msg);
+        else
+          msg++;
+        break;
       default:
-	if(unlink((*msg).filename.c_str()) == -1) {
-	  fout << "Can't unlink file: " << strerror(errno) << endl;
-	  msg++;
-	}
-	else
-	  messages.remove(msg);
+        if(unlink((*msg).filename.c_str()) == -1) {
+          fout << "Can't unlink file: " << strerror(errno) << endl;
+          msg++;
+        }
+        else
+          messages.remove(msg);
       }
     }
   }
@@ -443,7 +496,9 @@ bool read_trigger()
 {
   if(trigger != -1) {
     char buf[1024];
-    read(trigger, buf, sizeof buf);
+    ssize_t len = read(trigger, buf, sizeof buf);
+    if (len < 0)
+      fail1sys("Could not read trigger.");
 #ifdef NAMEDPIPEBUG
     close(trigger2);
 #endif
@@ -486,16 +541,19 @@ bool do_select()
 
 int main(int, char*[])
 {
+  fout << PACKAGE_STRING << " main loop initiated..." << endl;
   trigger_path = CONFIG_PATH(QUEUE, NULL, "trigger");
+  fout << trigger_path << endl;
   msg_dir = CONFIG_PATH(QUEUE, NULL, "queue");
+  fout << msg_dir << endl;
 
   read_hostnames();
 
-  if(!selfpipe) {
+  if(!spipe) {
     fout << "Could not set up self-pipe." << endl;
     return 1;
   }
-  selfpipe.catchsig(SIGCHLD);
+  spipe.catchsig(SIGCHLD);
   
   if(!open_trigger())
     return 1;

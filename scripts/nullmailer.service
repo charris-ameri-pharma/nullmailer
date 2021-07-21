@@ -9,8 +9,8 @@ ConditionPathExists=/etc/nullmailer/me
 [Service]
 WorkingDirectory=/var/spool/nullmailer
 ExecStart=/usr/sbin/nullmailer-send
-User=nullmail
-Group=nullmail
+User=mail
+Group=mail
 Restart=always
 
 [Install]
